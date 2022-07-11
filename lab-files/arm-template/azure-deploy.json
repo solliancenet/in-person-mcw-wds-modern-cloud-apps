@@ -1,0 +1,490 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.1.0.0",
+  "parameters": {
+    "signedInUserObjectId": {
+      "type": "string",
+      "metadata": {
+        "description": "The Object Id associated with the account you used to sign into the Azure portal. Retrieve this using the Azure CLI and 'az ad signed-in-user show --query objectId -o tsv'."
+      }
+    },
+    "username": {
+      "defaultValue": "demouser",
+      "type": "string",
+      "metadata": {
+        "description": "Administrator user name for logging into the virtual machine and Azure SQL DB."
+      }
+    },
+    "password": {
+      "defaultValue": "Password.1!!",
+      "type": "secureString",
+      "minLength": 8,
+      "maxLength": 128,
+      "metadata": {
+        "description": "The password must be between 8 and 128 characters in length and must contain at least one number, one non-alphanumeric character, and one upper or lower case letter. Default value is Password.1!!"
+      }
+    }
+  },
+  "variables": {
+    "gitHubOrg": "solliancenet",
+    "gitHubBranch": "master",
+
+    "location": "[resourceGroup().location]",
+
+    "virtualNetworkName": "[concat(resourceGroup().name, '-vnet')]",
+    "addressPrefix": "10.0.2.0/24",
+    "subnetName": "default",
+    "subnetPrefix": "10.0.2.0/24",
+
+    "vmName": "LabVM",
+    "vmSize": "Standard_D2s_v3",
+    "vmNetworkSecurityGroupName": "[concat(variables('vmName'), '-nsg')]",
+    "vmNetworkInterfaceName": "[concat(variables('vmName'), '-nic')]",
+    "vmPublicIpAddressName": "[concat(variables('vmName'), '-ip')]",
+    "vmCustomScriptFileName": "configure-labvm.ps1",
+    "vmCustomScriptUri": "[concat('https://raw.githubusercontent.com/', variables('gitHubOrg'), '/challenge-modern-cloud-apps/', variables('gitHubBranch'), '/lab-files/arm-template/', variables('vmCustomScriptFileName'))]",
+
+    "webAppName": "[concat('contosoapp', uniqueString(resourceGroup().id))]",
+    "hostingPlanName": "[concat('contoso-asp-', uniqueString(resourceGroup().id))]",
+
+    "databaseName": "ContosoSportsDB",
+    "databaseServerName": "[concat('contososports', uniqueString(resourceGroup().id))]",
+
+    "appInsightsName": "[concat('app-insights-', uniqueString(resourceGroup().id))]",
+    "storageAccountName": "[concat('contoso', uniqueString(resourceGroup().id))]",
+
+    "serviceBusName": "[concat('contoso-sb-', uniqueString(resourceGroup().id))]",
+    "serviceBusQueueName": "receiptgenerator",
+
+    "keyVaultName": "[concat('key-vault-', uniqueString(resourceGroup().id))]",
+    "logicAppName": "[concat('logic-app-', uniqueString(resourceGroup().id))]",
+    "appConfigName": "[concat('app-config-', uniqueString(resourceGroup().id))]"
+  },
+  "resources": [
+    {
+      "name": "[variables('appConfigName')]",
+      "type": "Microsoft.AppConfiguration/configurationStores",
+      "apiVersion": "2020-07-01-Preview",
+      "location": "[variables('location')]",
+      "properties":{
+      },
+      "sku": {
+        "name": "free"
+      }
+    },
+    {
+      "name": "[variables('keyVaultName')]",
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2019-09-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "sku": {
+          "name": "Standard",
+          "family": "A"
+        },
+        "enableSoftDelete": false,
+        "tenantId": "[subscription().tenantId]",
+        "accessPolicies": [
+          {
+            "objectId": "[parameters('signedInUserObjectId')]",
+            "permissions": {
+              "secrets": ["all"]
+            },
+            "tenantId": "[subscription().tenantId]"
+          }
+        ]
+      }
+    },
+    {
+      "name": "[concat(variables('keyVaultName'), '/add')]",
+      "type": "Microsoft.KeyVault/vaults/accessPolicies",
+      "apiVersion": "2019-09-01",
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', variables('keyVaultName'))]"
+      ],
+      "properties": {
+        "accessPolicies": [
+          {
+            "tenantId": "[subscription().tenantId]",
+            "objectId": "[reference(resourceId('Microsoft.Web/sites', variables('webAppName')), '2020-12-01', 'Full').identity.principalId]",
+            "permissions": {
+              "secrets": ["get"]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "[variables('logicAppName')]",
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2016-06-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {},
+          "actions": {},
+          "triggers": {},
+          "outputs": {}
+        },
+        "parameters": {}
+      }
+    },
+    {
+      "name": "[variables('webAppName')]",
+      "type": "Microsoft.Web/sites",
+      "apiVersion": "2020-12-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[concat('Microsoft.Web/serverfarms/', variables('hostingPlanName'))]",
+        "[concat('microsoft.insights/components/', variables('appInsightsName'))]"
+      ],
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "name": "[variables('webAppName')]",
+        "serverFarmId": "[resourceId('Microsoft.Web/serverfarms/', variables('hostingPlanName'))]",
+        "siteConfig": {
+          "connectionStrings": [
+            {
+              "name": "defaultConnection",
+              "connectionString": "[concat('Data Source=tcp:' , reference(concat('Microsoft.Sql/servers/', variables('databaseServerName'))).fullyQualifiedDomainName , ',1433;Initial Catalog=', variables('databaseName'),';User Id=', parameters('username'),'@',reference(concat('Microsoft.Sql/servers/', variables('databaseServerName'))).fullyQualifiedDomainName,';Password=',parameters('password'),';')]",
+              "type": "SQLAzure"
+            },
+            {
+              "name": "AppConfig",
+              "connectionString": "[listKeys(resourceId('Microsoft.AppConfiguration/configurationStores', variables('appConfigName')), '2020-07-01-Preview').value[0].connectionString]",
+              "type:": "Custom"
+            }
+          ],
+          "appSettings": [
+            {
+              "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
+              "value": "[reference(resourceId('Microsoft.Insights/components/', variables('appInsightsName')), '2018-05-01-preview').InstrumentationKey]"
+            },
+            {
+              "name": "ApplicationInsightsAgent_EXTENSION_VERSION",
+              "value": "~2"
+            },
+            {
+              "name": "XDT_MicrosoftApplicationInsights_Mode",
+              "value": "recommended"
+            },
+            {
+              "name": "DiagnosticServices_EXTENSION_VERSION",
+              "value": "disabled"
+            },
+            {
+              "name": "APPINSIGHTS_PROFILERFEATURE_VERSION",
+              "value": "disabled"
+            },
+            {
+              "name": "APPINSIGHTS_SNAPSHOTFEATURE_VERSION",
+              "value": "disabled"
+            },
+            {
+              "name": "InstrumentationEngine_EXTENSION_VERSION",
+              "value": "disabled"
+            },
+            {
+              "name": "SnapshotDebugger_EXTENSION_VERSION",
+              "value": "disabled"
+            },
+            {
+              "name": "XDT_MicrosoftApplicationInsights_BaseExtensions",
+              "value": "disabled"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "[variables('hostingPlanName')]",
+      "type": "Microsoft.Web/serverfarms",
+      "apiVersion": "2020-06-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "name": "[variables('hostingPlanName')]",
+        "workerSizeId": "0",
+        "numberOfWorkers": "1",
+        "hostingEnvironment": ""
+      },
+      "sku": {
+        "tier": "Standard",
+        "name": "S1"
+      }
+    },
+    {
+      "type": "Microsoft.Insights/components",
+      "apiVersion": "2018-05-01-preview",
+      "name": "[variables('appInsightsName')]",
+      "location": "[if(or(equals(variables('location'),'eastus2'),equals(variables('location'),'westcentralus')),'southcentralus',variables('location'))]",
+      "kind": "web",
+      "properties": {
+        "Application_Type": "web",
+        "ApplicationId": "[variables('appInsightsName')]"
+      }
+    },
+    {
+      "name": "[variables('databaseServerName')]",
+      "type": "Microsoft.Sql/servers",
+      "location": "[variables('location')]",
+      "apiVersion": "2020-11-01-preview",
+      "properties": {
+        "administratorLogin": "[parameters('username')]",
+        "administratorLoginPassword": "[parameters('password')]"
+      },
+      "resources": [
+        {
+          "name": "[variables('databaseName')]",
+          "type": "databases",
+          "location": "[variables('location')]",
+          "apiVersion": "2020-11-01-preview",
+          "dependsOn": [
+            "[concat('Microsoft.Sql/servers/', variables('databaseServerName'))]"
+          ],
+          "sku": {
+            "name": "S1",
+            "tier": "Standard"
+          },
+          "properties": {
+            "collation": "SQL_Latin1_General_CP1_CI_AS",
+            "maxSizeBytes": "2147483648"
+          }
+        },
+        {
+          "name": "AllowAllWindowsAzureIps",
+          "type": "firewallRules",
+          "apiVersion": "2020-11-01-preview",
+          "location": "[variables('location')]",
+          "dependsOn": [
+            "[concat('Microsoft.Sql/servers/', variables('databaseServerName'))]"
+          ],
+          "properties": {
+            "endIpAddress": "0.0.0.0",
+            "startIpAddress": "0.0.0.0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "[variables('storageAccountName')]",
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2019-06-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "accessTier": "Hot"
+      },
+      "dependsOn": [],
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "tags": {}
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces",
+      "apiVersion": "2017-04-01",
+      "name": "[variables('serviceBusName')]",
+      "location": "[variables('location')]",
+      "sku": {
+        "name": "Basic",
+        "tier": "Basic"
+      },
+      "properties": {
+        "zoneRedundant": false
+      }
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces/queues",
+      "apiVersion": "2017-04-01",
+      "name": "[concat(variables('serviceBusName'), '/', variables('serviceBusQueueName'))]",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ServiceBus/namespaces', variables('serviceBusName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces/queues/authorizationRules",
+      "apiVersion": "2017-04-01",
+      "name": "[concat(variables('serviceBusName'), '/', variables('serviceBusQueueName'), '/Listener')]",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ServiceBus/namespaces/queues', variables('serviceBusName'), variables('serviceBusQueueName'))]",
+        "[resourceId('Microsoft.ServiceBus/namespaces', variables('serviceBusName'))]"
+      ],
+      "properties": {
+        "rights": ["Listen"]
+      }
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces/queues/authorizationRules",
+      "apiVersion": "2017-04-01",
+      "name": "[concat(variables('serviceBusName'), '/', variables('serviceBusQueueName'), '/Publisher')]",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ServiceBus/namespaces/queues', variables('serviceBusName'), variables('serviceBusQueueName'))]",
+        "[resourceId('Microsoft.ServiceBus/namespaces', variables('serviceBusName'))]"
+      ],
+      "properties": {
+        "rights": ["Send"]
+      }
+    },
+    {
+      "name": "[variables('vmName')]",
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2020-06-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/networkInterfaces/', variables('vmNetworkInterfaceName'))]"
+      ],
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[variables('vmSize')]"
+        },
+        "storageProfile": {
+          "osDisk": {
+            "createOption": "FromImage",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS"
+            }
+          },
+          "imageReference": {
+            "publisher": "microsoftvisualstudio",
+            "offer": "visualstudio2019latest",
+            "sku": "vs-2019-comm-latest-ws2019",
+            "version": "latest"
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', variables('vmNetworkInterfaceName'))]"
+            }
+          ]
+        },
+        "osProfile": {
+          "computerName": "[variables('vmName')]",
+          "adminUsername": "[parameters('username')]",
+          "adminPassword": "[parameters('password')]",
+          "windowsConfiguration": {
+            "enableAutomaticUpdates": true,
+            "provisionVmAgent": true
+          }
+        }
+      },
+      "resources": [
+        {
+          "name": "SetupLabVm",
+          "type": "extensions",
+          "apiVersion": "2020-06-01",
+          "location": "[variables('location')]",
+          "properties": {
+            "publisher": "Microsoft.Compute",
+            "type": "CustomScriptExtension",
+            "protectedSettings": {},
+            "typeHandlerVersion": "1.9",
+            "autoUpgradeMinorVersion": true,
+            "settings": {
+              "fileUris": ["[variables('vmCustomScriptUri')]"],
+              "commandToExecute": "[concat('powershell -ExecutionPolicy Unrestricted -File ', variables('vmCustomScriptFileName'))]"
+            }
+          },
+          "dependsOn": [
+            "[resourceId('Microsoft.Compute/virtualMachines/', variables('vmName'))]"
+          ],
+          "tags": {
+            "displayName": "SetupLabVm"
+          }
+        }
+      ]
+    },
+    {
+      "name": "[variables('virtualNetworkName')]",
+      "type": "Microsoft.Network/virtualNetworks",
+      "apiVersion": "2020-06-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "addressSpace": {
+          "addressPrefixes": ["[variables('addressPrefix')]"]
+        },
+        "subnets": [
+          {
+            "name": "[variables('subnetName')]",
+            "properties": {
+              "addressPrefix": "[variables('subnetPrefix')]"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "[variables('vmNetworkInterfaceName')]",
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2020-06-01",
+      "location": "[variables('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/virtualNetworks/', variables('virtualNetworkName'))]",
+        "[resourceId('Microsoft.Network/publicIpAddresses/', variables('vmPublicIpAddressName'))]",
+        "[resourceId('Microsoft.Network/networkSecurityGroups/', variables('vmNetworkSecurityGroupName'))]"
+      ],
+      "properties": {
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "subnet": {
+                "id": "[resourceId('Microsoft.Network/virtualNetworks/subnets', variables('virtualNetworkName'), variables('subnetName'))]"
+              },
+              "privateIPAllocationMethod": "Dynamic",
+              "publicIpAddress": {
+                "id": "[resourceId('Microsoft.Network/publicIpAddresses', variables('vmPublicIpAddressName'))]"
+              }
+            }
+          }
+        ],
+        "networkSecurityGroup": {
+          "id": "[resourceId('Microsoft.Network/networkSecurityGroups', variables('vmNetworkSecurityGroupName'))]"
+        }
+      }
+    },
+    {
+      "name": "[variables('vmPublicIpAddressName')]",
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2020-06-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "publicIPAllocationMethod": "Dynamic"
+      },
+      "sku": {
+        "name": "Basic"
+      }
+    },
+    {
+      "name": "[variables('vmNetworkSecurityGroupName')]",
+      "type": "Microsoft.Network/networkSecurityGroups",
+      "apiVersion": "2020-06-01",
+      "location": "[variables('location')]",
+      "properties": {
+        "securityRules": [
+          {
+            "name": "RDP",
+            "properties": {
+              "priority": 300,
+              "protocol": "Tcp",
+              "access": "Allow",
+              "direction": "Inbound",
+              "sourceAddressPrefix": "*",
+              "sourcePortRange": "*",
+              "destinationAddressPrefix": "*",
+              "destinationPortRange": "3389"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "outputs": {}
+}
